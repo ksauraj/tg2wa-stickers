@@ -97,7 +97,10 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
-          script: ./gradlew --no-daemon connectedDebugAndroidTest
+          script: |
+            adb logcat -c
+            ./gradlew --no-daemon connectedDebugAndroidTest
+            adb logcat -d -s TG2WA_BENCH:I
       - uses: actions/upload-artifact@v7
         if: always()
         with:
