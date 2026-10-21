@@ -25,9 +25,10 @@ class Vp9AlphaDecoder(private val video: WebmDemuxer.Video) {
 
     /**
      * Calls [onFrame] for each decoded frame in order. The bitmap is reused between
-     * calls, so copy it if you need to keep it.
+     * calls, so copy it if you need to keep it. Frames for which [needed] is false are
+     * still decoded (VP9 frames depend on each other) but not colour-converted.
      */
-    fun decode(onFrame: (index: Int, timeMs: Long, frame: Bitmap) -> Unit) {
+    fun decode(needed: (index: Int) -> Boolean = { true }, onFrame: (index: Int, timeMs: Long, frame: Bitmap) -> Unit) {
         val w = video.width
         val h = video.height
         // Only trust the alpha stream when every frame carries one; otherwise treat as opaque.
@@ -44,15 +45,20 @@ class Vp9AlphaDecoder(private val video: WebmDemuxer.Video) {
             while (next < video.frames.size) {
                 val c = color.nextFrame(timeUs(next)) ?: break
                 val a = alpha?.nextFrame(timeUs(next))
+                val want = needed(next)
                 try {
-                    if (a != null && alphaPlane != null) copyLuma(a.image, w, h, alphaPlane)
-                    yuvToArgb(c.image, w, h, if (a != null) alphaPlane else null, argb)
+                    if (want) {
+                        if (a != null && alphaPlane != null) copyLuma(a.image, w, h, alphaPlane)
+                        yuvToArgb(c.image, w, h, if (a != null) alphaPlane else null, argb)
+                    }
                 } finally {
                     c.close()
                     a?.close()
                 }
-                bitmap.setPixels(argb, 0, w, 0, 0, w, h)
-                onFrame(next, video.frames[next].timeMs, bitmap)
+                if (want) {
+                    bitmap.setPixels(argb, 0, w, 0, 0, w, h)
+                    onFrame(next, video.frames[next].timeMs, bitmap)
+                }
                 next++
             }
             check(next > 0) { "decoder produced no frames" }
@@ -157,40 +163,67 @@ class Vp9AlphaDecoder(private val video: WebmDemuxer.Video) {
         }
     }
 
+    // Plane bytes are copied out in one bulk get per plane: per-pixel ByteBuffer.get()
+    // calls are several times slower on ART.
+    private var yBuf = ByteArray(0)
+    private var uBuf = ByteArray(0)
+    private var vBuf = ByteArray(0)
+    private var aBuf = ByteArray(0)
+
+    private fun grab(plane: Image.Plane, cache: ByteArray): ByteArray {
+        val src = plane.buffer.duplicate()
+        src.position(0)
+        val n = src.remaining()
+        val dst = if (cache.size >= n) cache else ByteArray(n)
+        src.get(dst, 0, n)
+        return dst
+    }
+
     private fun copyLuma(img: Image, w: Int, h: Int, out: ByteArray) {
         val crop = img.cropRect
         val y = img.planes[0]
-        val buf = y.buffer
+        aBuf = grab(y, aBuf)
         val rs = y.rowStride
         val ps = y.pixelStride
+        val buf = aBuf
         for (row in 0 until h) {
             val base = (row + crop.top) * rs + crop.left * ps
-            for (col in 0 until w) out[row * w + col] = buf.get(base + col * ps)
+            if (ps == 1) {
+                System.arraycopy(buf, base, out, row * w, w)
+            } else {
+                for (col in 0 until w) out[row * w + col] = buf[base + col * ps]
+            }
         }
     }
 
     private fun yuvToArgb(img: Image, w: Int, h: Int, alpha: ByteArray?, out: IntArray) {
         val crop = img.cropRect
-        val (yP, uP, vP) = img.planes
-        val yb = yP.buffer; val ub = uP.buffer; val vb = vP.buffer
+        val planes = img.planes
+        val yP = planes[0]; val uP = planes[1]; val vP = planes[2]
+        yBuf = grab(yP, yBuf); uBuf = grab(uP, uBuf); vBuf = grab(vP, vBuf)
+        val yb = yBuf; val ub = uBuf; val vb = vBuf
         val yRs = yP.rowStride; val yPs = yP.pixelStride
         val uRs = uP.rowStride; val uPs = uP.pixelStride
         val vRs = vP.rowStride; val vPs = vP.pixelStride
+        val left = crop.left
         for (row in 0 until h) {
             val yr = row + crop.top
-            val cr = yr / 2
+            val yRow = yr * yRs
+            val uRow = (yr shr 1) * uRs
+            val vRow = (yr shr 1) * vRs
+            val outRow = row * w
             for (col in 0 until w) {
-                val yc = col + crop.left
-                val cc = yc / 2
-                val yy = (yb.get(yr * yRs + yc * yPs).toInt() and 0xFF) - 16
-                val u = (ub.get(cr * uRs + cc * uPs).toInt() and 0xFF) - 128
-                val v = (vb.get(cr * vRs + cc * vPs).toInt() and 0xFF) - 128
+                val yc = col + left
+                val cc = yc shr 1
+                val yy = (yb[yRow + yc * yPs].toInt() and 0xFF) - 16
+                val u = (ub[uRow + cc * uPs].toInt() and 0xFF) - 128
+                val v = (vb[vRow + cc * vPs].toInt() and 0xFF) - 128
                 val c = 298 * (if (yy < 0) 0 else yy)
                 val r = clamp((c + 409 * v + 128) shr 8)
                 val g = clamp((c - 100 * u - 208 * v + 128) shr 8)
                 val b = clamp((c + 516 * u + 128) shr 8)
-                val a = if (alpha != null) alpha[row * w + col].toInt() and 0xFF else 0xFF
-                out[row * w + col] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                val a = if (alpha != null) alpha[outRow + col].toInt() and 0xFF else 0xFF
+                out[outRow + col] = (a shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
     }

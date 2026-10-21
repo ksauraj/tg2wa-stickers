@@ -293,7 +293,7 @@ private fun HomeScreen(vm: MainViewModel, name: String) {
                             Spacer(Modifier.height(6.dp))
                             if (s.stickers > 0) {
                                 LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
-                                Text("Sticker ${s.sticker + 1} of ${s.stickers}", style = MaterialTheme.typography.bodySmall)
+                                Text("${s.sticker} of ${s.stickers} stickers converted", style = MaterialTheme.typography.bodySmall)
                             } else {
                                 LinearProgressIndicator(Modifier.fillMaxWidth())
                             }

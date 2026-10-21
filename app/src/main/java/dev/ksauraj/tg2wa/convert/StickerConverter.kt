@@ -41,10 +41,13 @@ class StickerConverter {
         const val MAX_DURATION_MS = 10_000L
         private const val SAFETY = 2 * 1024 // stay clear of the hard limits
         private val STATIC_QUALITY = intArrayOf(92, 85, 78, 70, 60, 50, 40, 30, 20, 10)
-        // (fps, quality) ladder, best first.
+        // (fps, quality) ladder, best first. 24 fps already looks smooth for stickers.
         private val ANIMATED_LADDER = listOf(
-            30 to 80, 25 to 75, 20 to 70, 20 to 55, 15 to 55, 15 to 40, 12 to 35, 10 to 30, 10 to 20, 8 to 15, 6 to 10,
+            24 to 75, 20 to 70, 20 to 55, 15 to 55, 15 to 40, 12 to 35, 10 to 30, 10 to 20, 8 to 15, 6 to 10,
         )
+        // After this many frames, extrapolate the final size and give up early on a rung
+        // that clearly won't fit instead of encoding the whole clip first.
+        private const val PROJECT_AFTER = 6
     }
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
@@ -121,6 +124,10 @@ class StickerConverter {
                         val bytes = webp(canvasBmp, quality)
                         total += bytes.size + 24
                         if (total > budget) throw TooBig()
+                        val done = frames.size + 1
+                        if (done >= PROJECT_AFTER && done < count && total.toLong() * count / done > budget * 11L / 10) {
+                            throw TooBig()
+                        }
                         val i = frames.size
                         // Spread rounding so the sum of durations equals the clip length.
                         val dur = ((i + 1) * duration / count - i * duration / count).toInt()
@@ -195,7 +202,7 @@ class StickerConverter {
                 while (src + 1 < times.size && times[src + 1] <= t) src++
                 slotsFor[src] = (slotsFor[src] ?: 0) + 1
             }
-            Vp9AlphaDecoder(video).decode { index, _, bitmap ->
+            Vp9AlphaDecoder(video).decode(needed = { (slotsFor[it] ?: 0) > 0 }) { index, _, bitmap ->
                 repeat(slotsFor[index] ?: 0) { onFrame(bitmap) }
             }
         }

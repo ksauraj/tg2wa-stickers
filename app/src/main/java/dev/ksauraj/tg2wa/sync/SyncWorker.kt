@@ -23,7 +23,18 @@ import dev.ksauraj.tg2wa.store.ConvertedSticker
 import dev.ksauraj.tg2wa.store.PackPlanner
 import dev.ksauraj.tg2wa.store.StoredPack
 import dev.ksauraj.tg2wa.store.StoredSticker
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
 import java.security.MessageDigest
 
@@ -48,6 +59,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         const val OUT_ERROR = "error"
         private const val NOTIFICATION_ID = 42
         private const val TAG = "SyncWorker"
+        private const val DOWNLOADS = 6
 
         /** [setIds] null = every installed set. */
         fun enqueue(context: Context, setIds: LongArray? = null) {
@@ -62,7 +74,13 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
     private val app = context.applicationContext as App
     private val converter = StickerConverter()
-    private var failedStickers = 0
+    private val failedStickers = AtomicInteger(0)
+    private val downloads = Semaphore(DOWNLOADS)
+    private val convertDispatcher = Dispatchers.Default.limitedParallelism(
+        (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4),
+    )
+    private val progressLock = Mutex()
+    private var lastProgressAt = 0L
 
     override suspend fun doWork(): Result {
         foreground("Connecting to Telegram", 0, 0)
@@ -94,7 +112,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         return Result.success(
             workDataOf(
                 OUT_PACKS to packCount,
-                OUT_FAILED_STICKERS to failedStickers,
+                OUT_FAILED_STICKERS to failedStickers.get(),
                 OUT_FAILED_SETS to failedSets.joinToString("\n"),
             ),
         )
@@ -113,27 +131,35 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         work.deleteRecursively()
         work.mkdirs()
         try {
-            val converted = ArrayList<ConvertedSticker>()
-            for ((n, sticker) in set.stickers.withIndex()) {
-                if (isStopped) throw CancellationException("stopped")
-                progress(set.title, setIndex, setCount, n, set.stickers.size)
-                val format = when (sticker.format) {
-                    is StickerFormatWebp -> SourceFormat.WEBP
-                    is StickerFormatTgs -> SourceFormat.TGS
-                    is StickerFormatWebm -> SourceFormat.WEBM
-                }
-                try {
-                    val src = app.telegram.download(sticker.sticker)
-                    val result = converter.convert(src, format)
-                    val out = File(work, "%03d.webp".format(n))
-                    out.writeBytes(result.bytes)
-                    converted += ConvertedSticker(out, result.animated, sticker.emoji)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    failedStickers++
-                    Log.w(TAG, "sticker $n of ${set.name} ($format) failed", e)
-                }
+            // Pipeline: up to DOWNLOADS files in flight from Telegram, and conversions on
+            // a few cores at once. Each sticker is independent, results keep their order.
+            val done = AtomicInteger(0)
+            val total = set.stickers.size
+            val converted = coroutineScope {
+                set.stickers.mapIndexed { n, sticker ->
+                    async {
+                        val format = when (sticker.format) {
+                            is StickerFormatWebp -> SourceFormat.WEBP
+                            is StickerFormatTgs -> SourceFormat.TGS
+                            is StickerFormatWebm -> SourceFormat.WEBM
+                        }
+                        val item = try {
+                            val src = downloads.withPermit { app.telegram.download(sticker.sticker) }
+                            val result = withContext(convertDispatcher) { StickerConverter().convert(src, format) }
+                            val out = File(work, "%03d.webp".format(n))
+                            out.writeBytes(result.bytes)
+                            ConvertedSticker(out, result.animated, sticker.emoji)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            failedStickers.incrementAndGet()
+                            Log.w(TAG, "sticker $n of ${set.name} ($format) failed", e)
+                            null
+                        }
+                        progress(set.title, setIndex, setCount, done.incrementAndGet(), total)
+                        item
+                    }
+                }.awaitAll().filterNotNull()
             }
             val planned = PackPlanner.plan(set.id, set.title, converted)
             val oldVersions = existing.associate { it.id to it.version }
@@ -175,6 +201,16 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     }
 
     private suspend fun progress(title: String, setIndex: Int, setCount: Int, sticker: Int, stickers: Int) {
+        // Called from many coroutines at once: serialize and throttle.
+        progressLock.withLock {
+            val now = SystemClock.elapsedRealtime()
+            if (sticker in 1 until stickers && now - lastProgressAt < 400) return
+            lastProgressAt = now
+            publish(title, setIndex, setCount, sticker, stickers)
+        }
+    }
+
+    private suspend fun publish(title: String, setIndex: Int, setCount: Int, sticker: Int, stickers: Int) {
         setProgress(
             workDataOf(
                 P_SET_TITLE to title, P_SET_INDEX to setIndex, P_SET_COUNT to setCount,
