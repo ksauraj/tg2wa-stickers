@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- sticker with a peeled corner -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M34,32h32a8,8 0,0 1,8 8v18l-24,24h-16a8,8 0,0 1,-8 -8v-34a8,8 0,0 1,8 -8z" />
+    <path android:fillColor="#FFD8F3E3"
+        android:pathData="M74,58l-24,24v-16a8,8 0,0 1,8 -8z" />
+    <!-- paper plane -->
+    <path android:fillColor="#FF2AABEE"
+        android:pathData="M37,52l26,-11l-6,25l-7,-6l-4,5l-1,-8l12,-11l-15,9z" />
+</vector>

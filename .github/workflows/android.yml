@@ -1,0 +1,99 @@
+name: Android CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Releases are published by release.yml on a v* tag.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Unit tests + APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Check muxer output with libwebp's own tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq webp >/dev/null
+          webpinfo app/build/test-output/muxed.webp
+          webpmux -info app/build/test-output/muxed.webp
+          webpinfo app/build/test-output/first_frame.webp
+          dwebp app/build/test-output/first_frame.webp -o /tmp/first.png
+
+      - name: Decode signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.TG2WA_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "TG2WA_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "No signing secret: release APK will be debug-signed."
+          fi
+
+      - name: Build APKs
+        env:
+          TG2WA_KEYSTORE_PASSWORD: ${{ secrets.TG2WA_KEYSTORE_PASSWORD }}
+          TG2WA_KEY_ALIAS: ${{ secrets.TG2WA_KEY_ALIAS }}
+          TG2WA_KEY_PASSWORD: ${{ secrets.TG2WA_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleDebug assembleRelease
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apks
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*universal*.apk
+          if-no-files-found: error
+
+  device-tests:
+    name: Instrumented tests (emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Converter + provider tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: |
+            adb logcat -c
+            ./gradlew --no-daemon connectedDebugAndroidTest
+            adb logcat -d -s TG2WA_BENCH:I
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: device-test-report
+          path: app/build/reports/androidTests/
