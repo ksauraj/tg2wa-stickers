@@ -139,6 +139,21 @@ private fun ApiCredentialsScreen(busy: Boolean, onSave: (String, String) -> Unit
         Spacer(Modifier.height(8.dp))
         Text("Copy your Telegram sticker sets into WhatsApp.", style = MaterialTheme.typography.bodyLarge)
         Spacer(Modifier.height(24.dp))
+        WarnCard(
+            "Account warning: read this first",
+            "This is an unofficial app built on the Telegram API. Telegram's developer documentation " +
+                "says that \"all accounts that log in using unofficial Telegram API clients are " +
+                "automatically put under observation to avoid violations of the Terms of Service\", and " +
+                "that using the API for flooding or spamming means a permanent ban.\n\n" +
+                "This app only reads your sticker sets and downloads sticker files. It never sends " +
+                "messages or acts on your behalf. Even so:\n" +
+                "- Prefer an established account over a brand new one.\n" +
+                "- With hundreds of sticker sets, sync in sessions instead of all at once.\n" +
+                "- A banned account cannot be recovered by this app. Telegram's own route is to email " +
+                "recover@telegram.org yourself.\n\n" +
+                "Details: core.telegram.org/api/obtaining_api_id and core.telegram.org/api/terms",
+        )
+        Spacer(Modifier.height(16.dp))
         InfoCard(
             "First, your own Telegram API key",
             "1. Open my.telegram.org and log in with your number.\n" +
@@ -210,6 +225,29 @@ private fun StepScreen(
         }
         Spacer(Modifier.height(8.dp))
         footer()
+    }
+}
+
+@Composable
+private fun WarnCard(title: String, body: String) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        }
     }
 }
 
